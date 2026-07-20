@@ -2,6 +2,9 @@ import logging
 import sqlite3
 import asyncio
 import hashlib
+import os
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from threading import Thread
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -17,6 +20,21 @@ from telegram.ext import (
 # Настройка логирования
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# --- МИНИ-СЕРВЕР ДЛЯ RENDER (чтобы не было Timed Out) ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive!")
+
+def run_http_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
+
+# Запускаем HTTP-сервер в отдельном потоке
+Thread(target=run_http_server, daemon=True).start()
 
 # --- НАСТРОЙКИ БОТА ---
 TOKEN = "8713270514:AAH_iUzAutJrPal8KpLNV-lzA6wSm1gSRI4"
@@ -504,7 +522,6 @@ async def goal_daily_entered(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data["new_goal"]["daily"] = daily
     goal_id = create_goal(update.effective_user.id, context.user_data["new_goal"])
     
-    # Сразу показываем карточку созданной цели
     info, reply_markup = generate_goal_card(goal_id)
     await update.message.reply_text("🎉 <b>Цель успешно создана и добавлена в портфель!</b>", parse_mode="HTML")
     await update.message.reply_text(info, parse_mode="HTML", reply_markup=reply_markup)
@@ -521,7 +538,6 @@ async def goal_date_entered(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     context.user_data["new_goal"]["target_date"] = text
     goal_id = create_goal(update.effective_user.id, context.user_data["new_goal"])
     
-    # Сразу показываем карточку созданной цели
     info, reply_markup = generate_goal_card(goal_id)
     await update.message.reply_text("🎉 <b>Цель успешно создана и добавлена в портфель!</b>", parse_mode="HTML")
     await update.message.reply_text(info, parse_mode="HTML", reply_markup=reply_markup)
@@ -583,7 +599,7 @@ async def admin_add_currency_start(update: Update, context: ContextTypes.DEFAULT
 
 async def admin_curr_code_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["new_curr"] = {"code": update.message.text.strip().upper()}
-    await update.message.reply_text("符号 Введите символ валюты (например: <code>₮</code>, <code>₿</code>, <code>£</code>):", parse_mode="HTML")
+    await update.message.reply_text("🔘 Введите символ валюты (например: <code>₮</code>, <code>₿</code>, <code>£</code>):", parse_mode="HTML")
     return WAITING_NEW_CURR_SYM
 
 async def admin_curr_sym_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
