@@ -31,6 +31,7 @@ PREMIUM_PRICE_RUB = 150.0
 WAITING_START_TIME = 0
 CHOOSE_CATEGORY, WAITING_NAME, CHOOSE_CURRENCY, SELECT_MODE, WAITING_PRICE, WAITING_SAVED, WAITING_DAILY, WAITING_DATE = range(1, 9)
 WAITING_ADD_SUM = 0
+WAITING_NEW_CURR_CODE, WAITING_NEW_CURR_SYM, WAITING_NEW_CURR_NAME = range(10, 13)
 
 DB_FILE = "savings_bot.db"
 
@@ -58,7 +59,7 @@ def init_db():
             daily REAL,
             target_date TEXT,
             mode TEXT,
-            currency TEXT DEFAULT 'KZT'
+            currency TEXT DEFAULT 'RUB'
         )
     """)
     
@@ -73,7 +74,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS currencies (
             code TEXT PRIMARY KEY,
             symbol TEXT,
-            name TEXT
+            name TEXT,
+            sort_order INTEGER DEFAULT 100
         )
     """)
     
@@ -90,24 +92,24 @@ def init_db():
     cursor.execute("SELECT COUNT(*) FROM categories")
     if cursor.fetchone()[0] == 0:
         default_cats = [
-            ('Property', 'Недвижимость'),
-            ('Automotive', 'Автомобиль'),
-            ('Technology', 'Техника и гаджеты'),
-            ('Travel', 'Путешествия'),
-            ('Investment', 'Инвестиции и капитал'),
-            ('Other', 'Персональные цели')
+            ('Property', '🏠 Недвижимость'),
+            ('Automotive', '🚗 Автомобиль'),
+            ('Technology', '💻 Техника и гаджеты'),
+            ('Travel', '✈️ Путешествия'),
+            ('Investment', '📈 Инвестиции и капитал'),
+            ('Other', '🎯 Персональные цели')
         ]
         cursor.executemany("INSERT INTO categories (name, display_name) VALUES (?, ?)", default_cats)
         
     cursor.execute("SELECT COUNT(*) FROM currencies")
     if cursor.fetchone()[0] == 0:
         default_currs = [
-            ('KZT', '₸', 'Казахстанский тенге'),
-            ('USD', '$', 'Доллар США'),
-            ('RUB', '₽', 'Российский рубль'),
-            ('EUR', '€', 'Евро')
+            ('RUB', '₽', 'Российский рубль', 1),
+            ('USD', '$', 'Доллар США', 2),
+            ('EUR', '€', 'Евро', 3),
+            ('KZT', '₸', 'Казахстанский тенге', 4)
         ]
-        cursor.executemany("INSERT INTO currencies (code, symbol, name) VALUES (?, ?, ?)", default_currs)
+        cursor.executemany("INSERT INTO currencies (code, symbol, name, sort_order) VALUES (?, ?, ?, ?)", default_currs)
 
     conn.commit()
     conn.close()
@@ -135,7 +137,7 @@ def get_db_categories():
 def get_db_currencies():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("SELECT code, symbol, name FROM currencies")
+    cursor.execute("SELECT code, symbol, name FROM currencies ORDER BY sort_order ASC")
     rows = cursor.fetchall()
     conn.close()
     return rows
@@ -146,7 +148,7 @@ def get_currency_symbol(code: str) -> str:
     cursor.execute("SELECT symbol FROM currencies WHERE code = ?", (code,))
     row = cursor.fetchone()
     conn.close()
-    return row[0] if row else "₸"
+    return row[0] if row else code
 
 def add_active_user(user_id: int):
     conn = sqlite3.connect(DB_FILE)
@@ -162,15 +164,17 @@ def update_user_reminder(user_id: int, reminder_time: str):
     conn.commit()
     conn.close()
 
-def create_goal(user_id: int, data: dict):
+def create_goal(user_id: int, data: dict) -> int:
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO goals (user_id, category, name, price, saved, daily, target_date, mode, currency)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (user_id, data['category'], data['name'], data['price'], data['saved'], data.get('daily'), data.get('target_date'), data['mode'], data.get('currency', 'KZT')))
+    """, (user_id, data['category'], data['name'], data['price'], data['saved'], data.get('daily'), data.get('target_date'), data['mode'], data.get('currency', 'RUB')))
+    goal_id = cursor.lastrowid
     conn.commit()
     conn.close()
+    return goal_id
 
 def get_user_goals(user_id: int):
     conn = sqlite3.connect(DB_FILE)
@@ -230,14 +234,15 @@ async def custom_reminder_loop(application):
             for u_id in user_ids:
                 goals = get_user_goals(u_id)
                 if not goals: continue
-                text = "Напоминание о формировании капитала\n\nТекущие активы:\n"
+                text = "🔔 <b>Напоминание о формировании капитала</b>\n\nТекущие активные позиции:\n"
                 for g in goals:
                     left = max(0.0, g['price'] - g['saved'])
                     if left > 0:
-                        text += f"• {g['name']} — остаток: {format_money(left, g['currency'])}\n"
-                text += "\nУправление активами: /goals"
+                        text += f"• <b>{g['name']}</b> — остаток: {format_money(left, g['currency'])}\n"
+                
+                keyboard = [[InlineKeyboardButton("📂 Открыть портфель активов", callback_data="back_to_list")]]
                 try:
-                    await application.bot.send_message(chat_id=u_id, text=text)
+                    await application.bot.send_message(chat_id=u_id, text=text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
                 except Exception as e:
                     logger.error(f"Ошибка отправки напоминания: {e}")
         except Exception as e:
@@ -248,9 +253,12 @@ async def custom_reminder_loop(application):
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     add_active_user(user_id)
+    
+    keyboard = [[InlineKeyboardButton("🚀 Создать новую цель", callback_data="start_new_goal")]]
     await update.message.reply_text(
-        "Добро пожаловать в систему управления капиталом.\n\n"
-        "Укажите время для ежедневных персональных уведомлений в формате ЧЧ:ММ (например, 21:00):"
+        "👋 Добро пожаловать в профессиональную систему управления капиталом.\n\n"
+        "Укажите время для ежедневных персональных уведомлений в формате ЧЧ:ММ (например, 21:00):",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
     return WAITING_START_TIME
 
@@ -260,50 +268,53 @@ async def start_time_entered(update: Update, context: ContextTypes.DEFAULT_TYPE)
         valid_time = datetime.strptime(update.message.text.strip(), "%H:%M")
         time_str = valid_time.strftime("%H:%M")
         update_user_reminder(user_id, time_str)
+        
+        kb = [[InlineKeyboardButton("🚀 Создать финансовую цель", callback_data="start_new_goal")]]
         await update.message.reply_text(
-            f"Параметры уведомлений обновлены. Время отправки: {time_str}.\n\n"
-            "Для создания финансовой цели используйте команду /newgoal"
+            f"✅ Параметры уведомлений обновлены. Время отправки: <b>{time_str}</b>.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(kb)
         )
         return ConversationHandler.END
     except ValueError:
-        await update.message.reply_text("Неверный формат времени. Введите значение в формате ЧЧ:ММ (например, 20:00):")
+        await update.message.reply_text("⚠️ Неверный формат времени. Введите значение в формате ЧЧ:ММ (например, 20:00):")
         return WAITING_START_TIME
 
 # --- КАРТОЧКА ЦЕЛИ ---
 def generate_goal_card(goal_id: int):
     g = get_goal_by_id(goal_id)
-    if not g: return "Цель не найдена.", None
+    if not g: return "⚠️ Цель не найдена.", None
     
     curr = g["currency"]
     percent = min(100, int((g['saved'] / g['price']) * 100)) if g['price'] > 0 else 0
-    progress_bar = "◼" * (percent // 10) + "◻" * (10 - (percent // 10))
+    progress_bar = "🟩" * (percent // 10) + "⬜" * (10 - (percent // 10))
     left = max(0.0, g['price'] - g['saved'])
 
-    info = f"Цель: {g['name']}\n"
-    info += f"Категория: {g['category']}\n"
+    info = f"🎯 <b>Цель: {g['name']}</b>\n"
+    info += f"📂 Категория: {g['category']}\n"
     info += f"————————————————————\n"
-    info += f"Целевая стоимость: {format_money(g['price'], curr)}\n"
-    info += f"Накоплено: {format_money(g['saved'], curr)} ({percent}%)\n"
-    info += f"Прогресс: [{progress_bar}]\n"
-    info += f"Остаток: {format_money(left, curr)}\n\n"
+    info += f"💰 Целевая стоимость: {format_money(g['price'], curr)}\n"
+    info += f"💎 Накоплено: {format_money(g['saved'], curr)} ({percent}%)\n"
+    info += f"📊 Прогресс: [{progress_bar}]\n"
+    info += f"⏳ Остаток: {format_money(left, curr)}\n\n"
 
     if left > 0:
         if g["mode"] == "days":
             days = int(-(-left // g["daily"]))
-            info += f"Расчет: по {format_money(g['daily'], curr)} ежедневно. Срок: {days} дн.\n"
-            info += f"Планируемая дата достижения: {(datetime.now() + timedelta(days=days)).strftime('%d.%m.%Y')}"
+            info += f"📈 Расчет: по {format_money(g['daily'], curr)} ежедневно. Срок: ~{days} дн.\n"
+            info += f"📅 Дата достижения: <b>{(datetime.now() + timedelta(days=days)).strftime('%d.%m.%Y')}</b>"
         else:
             t_date = datetime.strptime(g["target_date"], "%d.%m.%Y")
             days = max(1, (t_date.date() - datetime.now().date()).days)
-            info += f"Дедлайн: {g['target_date']} ({days} дн.).\n"
-            info += f"Необходимый взнос: {format_money(left / days, curr)} в сутки"
+            info += f"📌 Дедлайн: {g['target_date']} ({days} дн.).\n"
+            info += f"⚡️ Необходимый взнос: <b>{format_money(left / days, curr)}</b> в сутки"
     else:
-        info += "Статус: Финансовая цель успешно достигнута."
+        info += "🏆 <b>Статус: Финансовая цель успешно достигнута!</b>"
 
     keyboard = [
-        [InlineKeyboardButton("Внести средства", callback_data=f"addmoney_{g['id']}")],
-        [InlineKeyboardButton("Удалить цель", callback_data=f"del_{g['id']}")],
-        [InlineKeyboardButton("К списку активов", callback_data="back_to_list")]
+        [InlineKeyboardButton("➕ Внести средства", callback_data=f"addmoney_{g['id']}")],
+        [InlineKeyboardButton("🗑 Удалить цель", callback_data=f"del_{g['id']}")],
+        [InlineKeyboardButton("📂 К списку активов", callback_data="back_to_list")]
     ]
     return info, InlineKeyboardMarkup(keyboard)
 
@@ -311,10 +322,22 @@ async def list_goals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     goals = get_user_goals(user_id)
     if not goals:
-        await update.message.reply_text("Активных финансовых целей не обнаружено. Создать новую: /newgoal")
+        kb = [[InlineKeyboardButton("🚀 Создать новую цель", callback_data="start_new_goal")]]
+        msg = "📂 Активных финансовых целей не обнаружено."
+        if update.callback_query:
+            await update.callback_query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb))
+        else:
+            await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb))
         return
-    keyboard = [[InlineKeyboardButton(f"{g['name']} — {format_money(g['price'], g['currency'])}", callback_data=f"view_{g['id']}")] for g in goals]
-    await update.message.reply_text("Портфель финансовых целей:", reply_markup=InlineKeyboardMarkup(keyboard))
+        
+    keyboard = [[InlineKeyboardButton(f"🎯 {g['name']} — {format_money(g['price'], g['currency'])}", callback_data=f"view_{g['id']}")] for g in goals]
+    keyboard.append([InlineKeyboardButton("➕ Создать новую цель", callback_data="start_new_goal")])
+    
+    msg = "💼 <b>Портфель финансовых целей:</b>"
+    if update.callback_query:
+        await update.callback_query.edit_message_text(msg, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await update.message.reply_text(msg, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def goal_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -324,76 +347,87 @@ async def goal_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
     if data.startswith("view_"):
         goal_id = int(data.split("_")[1])
         info, reply_markup = generate_goal_card(goal_id)
-        await query.edit_message_text(info, reply_markup=reply_markup)
+        await query.edit_message_text(info, parse_mode="HTML", reply_markup=reply_markup)
     elif data.startswith("addmoney_"):
         goal_id = int(data.split("_")[1])
         context.user_data["current_add_goal_id"] = goal_id
         g = get_goal_by_id(goal_id)
-        kb = [[InlineKeyboardButton("Отмена", callback_data=f"view_{goal_id}")]]
-        await query.message.reply_text(f"Введите сумму пополнения для позиции «{g['name']}»:", reply_markup=InlineKeyboardMarkup(kb))
+        kb = [[InlineKeyboardButton("❌ Отмена", callback_data=f"view_{goal_id}")]]
+        await query.message.reply_text(f"💵 Введите сумму пополнения для позиции «{g['name']}»:", reply_markup=InlineKeyboardMarkup(kb))
         return WAITING_ADD_SUM
     elif data.startswith("del_"):
         goal_id = int(data.split("_")[1])
         delete_goal(goal_id)
-        await query.edit_message_text("Позиция успешно удалена из портфеля.")
+        kb = [[InlineKeyboardButton("📂 Открыть портфель активов", callback_data="back_to_list")]]
+        await query.edit_message_text("🗑 Позиция успешно удалена из портфеля.", reply_markup=InlineKeyboardMarkup(kb))
 
 async def process_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         amount = float(update.message.text.strip().replace(",", "."))
         if amount <= 0: raise ValueError
     except ValueError:
-        await update.message.reply_text("Некорректный формат ввода. Укажите число:")
+        await update.message.reply_text("⚠️ Некорректный формат ввода. Укажите число:")
         return WAITING_ADD_SUM
         
     goal_id = context.user_data.get("current_add_goal_id")
     if goal_id:
         add_money_to_goal(goal_id, amount)
         g = get_goal_by_id(goal_id)
-        await update.message.reply_text(f"Баланс пополнен на +{format_money(amount, g['currency'])}.")
+        await update.message.reply_text(f"✅ Баланс пополнен на +{format_money(amount, g['currency'])}.")
         
         info, reply_markup = generate_goal_card(goal_id)
-        await update.message.reply_text(info, reply_markup=reply_markup)
+        await update.message.reply_text(info, parse_mode="HTML", reply_markup=reply_markup)
         
     return ConversationHandler.END
 
 # --- СОЗДАНИЕ ЦЕЛИ ---
 async def new_goal_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
+    query = update.callback_query
+    if query:
+        await query.answer()
+        user_id = query.from_user.id
+    else:
+        user_id = update.effective_user.id
+
     status = get_user_status(user_id)
     existing_goals = get_user_goals(user_id)
     
     if status['is_premium'] == 0 and len(existing_goals) >= 1:
-        kb = [[InlineKeyboardButton("Оформить Premium", callback_data="buy_premium")]]
-        await update.message.reply_text(
-            "Ограничение базовой версии.\n\n"
+        kb = [[InlineKeyboardButton("⭐ Оформить Premium", callback_data="buy_premium")]]
+        msg = (
+            "🔒 <b>Ограничение базовой версии.</b>\n\n"
             "На бесплатном тарифе доступна только 1 активная цель. "
-            "Приобретите статус Premium для снятия всех ограничений системы.",
-            reply_markup=InlineKeyboardMarkup(kb)
+            "Приобретите статус Premium для снятия всех ограничений системы."
         )
+        if query:
+            await query.edit_message_text(msg, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+        else:
+            await update.message.reply_text(msg, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
         return ConversationHandler.END
 
     context.user_data["new_goal"] = {}
     
     cats = get_db_categories()
     keyboard = [[InlineKeyboardButton(display, callback_data=f"cat_{name}")] for name, display in cats]
-    keyboard.append([InlineKeyboardButton("Отмена", callback_data="cancel_creation")])
+    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel_creation")])
     
-    if update.callback_query:
-        await update.callback_query.edit_message_text("Выберите категорию инвестирования:", reply_markup=InlineKeyboardMarkup(keyboard))
+    text = "📂 <b>Выберите категорию инвестирования:</b>"
+    if query:
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     else:
-        await update.message.reply_text("Выберите категорию инвестирования:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     return CHOOSE_CATEGORY
 
 async def cat_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
     if query.data == "cancel_creation":
-        await query.edit_message_text("Операция отменена.")
+        await query.edit_message_text("❌ Операция отменена.")
         return ConversationHandler.END
     context.user_data["new_goal"]["category"] = query.data.split("_")[1]
     
-    kb = [[InlineKeyboardButton("Назад", callback_data="back_to_cat")]]
-    await query.edit_message_text("Введите наименование цели (например, «Апартаменты» или «Новый автомобиль»):", reply_markup=InlineKeyboardMarkup(kb))
+    kb = [[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_cat")]]
+    await query.edit_message_text("✏️ Введите наименование цели (например, «Tesla Model 3» или «Квартира в центре»):", reply_markup=InlineKeyboardMarkup(kb))
     return WAITING_NAME
 
 async def name_entered(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -401,9 +435,9 @@ async def name_entered(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     
     currs = get_db_currencies()
     keyboard = [[InlineKeyboardButton(f"{name} ({sym})", callback_data=f"curr_{code}")] for code, sym, name in currs]
-    keyboard.append([InlineKeyboardButton("Назад", callback_data="back_to_name")])
+    keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_name")])
     
-    await update.message.reply_text("Выберите базовую валюту расчетов:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("💱 <b>Выберите валюту расчетов (фиат или криптовалюта):</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     return CHOOSE_CURRENCY
 
 async def currency_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -412,11 +446,11 @@ async def currency_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     context.user_data["new_goal"]["currency"] = query.data.split("_")[1]
     
     keyboard = [
-        [InlineKeyboardButton("Расчет по сумме ежедневных взносов", callback_data="gmode_days")],
-        [InlineKeyboardButton("Расчет по целевой дате (дедлайну)", callback_data="gmode_date")],
-        [InlineKeyboardButton("Назад", callback_data="back_to_curr")]
+        [InlineKeyboardButton("📊 Расчет по сумме ежедневных взносов", callback_data="gmode_days")],
+        [InlineKeyboardButton("📅 Расчет по целевой дате (дедлайну)", callback_data="gmode_date")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_curr")]
     ]
-    await query.edit_message_text("Выберите режим формирования накоплений:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text("⚙️ <b>Выберите режим формирования накоплений:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     return SELECT_MODE
 
 async def goal_mode_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -425,8 +459,8 @@ async def goal_mode_selected(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data["new_goal"]["mode"] = "days" if query.data == "gmode_days" else "date"
     
     sym = get_currency_symbol(context.user_data["new_goal"]["currency"])
-    kb = [[InlineKeyboardButton("Назад", callback_data="back_to_mode")]]
-    await query.edit_message_text(f"Укажите полную стоимость цели (в {sym}):", reply_markup=InlineKeyboardMarkup(kb))
+    kb = [[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_mode")]]
+    await query.edit_message_text(f"💰 Укажите полную стоимость цели (в {sym}):", reply_markup=InlineKeyboardMarkup(kb))
     return WAITING_PRICE
 
 async def goal_price_entered(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -434,12 +468,12 @@ async def goal_price_entered(update: Update, context: ContextTypes.DEFAULT_TYPE)
         price = float(update.message.text.strip().replace(",", "."))
         if price <= 0: raise ValueError
     except ValueError:
-        await update.message.reply_text("Введите числовое значение больше нуля:")
+        await update.message.reply_text("⚠️ Введите числовое значение больше нуля:")
         return WAITING_PRICE
     context.user_data["new_goal"]["price"] = price
     
-    kb = [[InlineKeyboardButton("Назад", callback_data="back_to_price")]]
-    await update.message.reply_text("Укажите объем средств, накопленный на текущий момент (при отсутствии — 0):", reply_markup=InlineKeyboardMarkup(kb))
+    kb = [[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_price")]]
+    await update.message.reply_text("💎 Укажите объем средств, накопленный на текущий момент (при отсутствии — 0):", reply_markup=InlineKeyboardMarkup(kb))
     return WAITING_SAVED
 
 async def goal_saved_entered(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -447,17 +481,17 @@ async def goal_saved_entered(update: Update, context: ContextTypes.DEFAULT_TYPE)
         saved = float(update.message.text.strip().replace(",", "."))
         if saved < 0: raise ValueError
     except ValueError:
-        await update.message.reply_text("Значение не может быть отрицательным. Повторите ввод:")
+        await update.message.reply_text("⚠️ Значение не может быть отрицательным. Повторите ввод:")
         return WAITING_SAVED
     context.user_data["new_goal"]["saved"] = saved
     
     sym = get_currency_symbol(context.user_data["new_goal"]["currency"])
-    kb = [[InlineKeyboardButton("Назад", callback_data="back_to_saved")]]
+    kb = [[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_saved")]]
     if context.user_data["new_goal"]["mode"] == "days":
-        await update.message.reply_text(f"Планируемый объем ежедневных отчислений ({sym}):", reply_markup=InlineKeyboardMarkup(kb))
+        await update.message.reply_text(f"📈 Планируемый объем ежедневных отчислений ({sym}):", reply_markup=InlineKeyboardMarkup(kb))
         return WAITING_DAILY
     else:
-        await update.message.reply_text("Укажите целевую дату в формате ДД.ММ.ГГГГ (например, 31.12.2026):", reply_markup=InlineKeyboardMarkup(kb))
+        await update.message.reply_text("📅 Укажите целевую дату в формате ДД.ММ.ГГГГ (например, 31.12.2027):", reply_markup=InlineKeyboardMarkup(kb))
         return WAITING_DATE
 
 async def goal_daily_entered(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -465,24 +499,32 @@ async def goal_daily_entered(update: Update, context: ContextTypes.DEFAULT_TYPE)
         daily = float(update.message.text.strip().replace(",", "."))
         if daily <= 0: raise ValueError
     except ValueError:
-        await update.message.reply_text("Значение должно быть больше 0:")
+        await update.message.reply_text("⚠️ Значение должно быть больше 0:")
         return WAITING_DAILY
     context.user_data["new_goal"]["daily"] = daily
-    create_goal(update.effective_user.id, context.user_data["new_goal"])
-    await update.message.reply_text("Цель успешно создана и добавлена в портфель. Просмотр активов: /goals")
+    goal_id = create_goal(update.effective_user.id, context.user_data["new_goal"])
+    
+    # Сразу показываем карточку созданной цели
+    info, reply_markup = generate_goal_card(goal_id)
+    await update.message.reply_text("🎉 <b>Цель успешно создана и добавлена в портфель!</b>", parse_mode="HTML")
+    await update.message.reply_text(info, parse_mode="HTML", reply_markup=reply_markup)
     return ConversationHandler.END
 
 async def goal_date_entered(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     text = update.message.text.strip()
     try:
         target_date = datetime.strptime(text, "%d.%m.%Y")
-        if target_date.date() <= datetime.now().date(): raise ValueError
+        if target_date.date() < datetime.now().date(): raise ValueError
     except ValueError:
-        await update.message.reply_text("Неверная дата. Укажите корректный день из будущего в формате ДД.ММ.ГГГГ:")
+        await update.message.reply_text("⚠️ Неверная дата. Укажите корректный день (сегодня или в будущем) в формате ДД.ММ.ГГГГ:")
         return WAITING_DATE
     context.user_data["new_goal"]["target_date"] = text
-    create_goal(update.effective_user.id, context.user_data["new_goal"])
-    await update.message.reply_text("Цель успешно создана и добавлена в портфель. Просмотр активов: /goals")
+    goal_id = create_goal(update.effective_user.id, context.user_data["new_goal"])
+    
+    # Сразу показываем карточку созданной цели
+    info, reply_markup = generate_goal_card(goal_id)
+    await update.message.reply_text("🎉 <b>Цель успешно создана и добавлена в портфель!</b>", parse_mode="HTML")
+    await update.message.reply_text(info, parse_mode="HTML", reply_markup=reply_markup)
     return ConversationHandler.END
 
 # НАВИГАЦИЯ «НАЗАД»
@@ -492,8 +534,8 @@ async def back_to_cat_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def back_to_name_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    kb = [[InlineKeyboardButton("Назад", callback_data="back_to_cat")]]
-    await query.edit_message_text("Введите наименование цели:", reply_markup=InlineKeyboardMarkup(kb))
+    kb = [[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_cat")]]
+    await query.edit_message_text("✏️ Введите наименование цели:", reply_markup=InlineKeyboardMarkup(kb))
     return WAITING_NAME
 
 async def back_to_curr_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -501,35 +543,70 @@ async def back_to_curr_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     currs = get_db_currencies()
     keyboard = [[InlineKeyboardButton(f"{name} ({sym})", callback_data=f"curr_{code}")] for code, sym, name in currs]
-    keyboard.append([InlineKeyboardButton("Назад", callback_data="back_to_name")])
-    await query.edit_message_text("Выберите базовую валюту расчетов:", reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_name")])
+    await query.edit_message_text("💱 Выберите валюту расчетов:", reply_markup=InlineKeyboardMarkup(keyboard))
     return CHOOSE_CURRENCY
 
 async def back_to_mode_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     keyboard = [
-        [InlineKeyboardButton("Расчет по сумме ежедневных взносов", callback_data="gmode_days")],
-        [InlineKeyboardButton("Расчет по целевой дате (дедлайну)", callback_data="gmode_date")],
-        [InlineKeyboardButton("Назад", callback_data="back_to_curr")]
+        [InlineKeyboardButton("📊 Расчет по сумме ежедневных взносов", callback_data="gmode_days")],
+        [InlineKeyboardButton("📅 Расчет по целевой дате (дедлайну)", callback_data="gmode_date")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_curr")]
     ]
-    await query.edit_message_text("Выберите режим формирования накоплений:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text("⚙️ Выберите режим формирования накоплений:", reply_markup=InlineKeyboardMarkup(keyboard))
     return SELECT_MODE
 
 async def back_to_price_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     sym = get_currency_symbol(context.user_data["new_goal"]["currency"])
-    kb = [[InlineKeyboardButton("Назад", callback_data="back_to_mode")]]
-    await query.edit_message_text(f"Укажите полную стоимость цели (в {sym}):", reply_markup=InlineKeyboardMarkup(kb))
+    kb = [[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_mode")]]
+    await query.edit_message_text(f"💰 Укажите полную стоимость цели (в {sym}):", reply_markup=InlineKeyboardMarkup(kb))
     return WAITING_PRICE
 
 async def back_to_saved_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    kb = [[InlineKeyboardButton("Назад", callback_data="back_to_price")]]
-    await query.edit_message_text("Укажите объем средств, накопленный на текущий момент:", reply_markup=InlineKeyboardMarkup(kb))
+    kb = [[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_price")]]
+    await query.edit_message_text("💎 Укажите объем средств, накопленный на текущий момент:", reply_markup=InlineKeyboardMarkup(kb))
     return WAITING_SAVED
+
+# --- ДОБАВЛЕНИЕ НОВОЙ ВАЛЮТЫ ИЛИ КРИПТЫ АДМИНОМ ---
+async def admin_add_currency_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Доступ запрещен.")
+        return
+    await update.message.reply_text("💱 Введите код новой валюты/крипты (например: <code>USDT</code>, <code>BTC</code>, <code>GBP</code>):", parse_mode="HTML")
+    return WAITING_NEW_CURR_CODE
+
+async def admin_curr_code_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["new_curr"] = {"code": update.message.text.strip().upper()}
+    await update.message.reply_text("符号 Введите символ валюты (например: <code>₮</code>, <code>₿</code>, <code>£</code>):", parse_mode="HTML")
+    return WAITING_NEW_CURR_SYM
+
+async def admin_curr_sym_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["new_curr"]["symbol"] = update.message.text.strip()
+    await update.message.reply_text("📝 Введите полное название (например: <code>Tether USD</code>, <code>Bitcoin</code>):", parse_mode="HTML")
+    return WAITING_NEW_CURR_NAME
+
+async def admin_curr_name_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    name = update.message.text.strip()
+    c_data = context.user_data["new_curr"]
+    
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT OR REPLACE INTO currencies (code, symbol, name, sort_order) VALUES (?, ?, ?, 50)",
+                       (c_data["code"], c_data["symbol"], name))
+        conn.commit()
+        await update.message.reply_text(f"✅ Валюта/крипта <b>{name} ({c_data['symbol']})</b> успешно добавлена в систему!", parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Ошибка добавления: {e}")
+    finally:
+        conn.close()
+    return ConversationHandler.END
 
 # --- ОПЛАТА ---
 async def buy_premium_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -541,13 +618,14 @@ async def buy_premium_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     pay_url = generate_aaio_url(order_id, PREMIUM_PRICE_RUB)
     
     keyboard = [
-        [InlineKeyboardButton("Оплатить подписку", url=pay_url)],
-        [InlineKeyboardButton("[Тест] Активировать Premium бесплатно", callback_data="give_test_premium")]
+        [InlineKeyboardButton("💳 Оплатить подписку", url=pay_url)],
+        [InlineKeyboardButton("🧪 [Тест] Активировать Premium бесплатно", callback_data="give_test_premium")]
     ]
     await query.message.reply_text(
-        "Привилегированный статус Premium\n\n"
-        f"Стоимость подписки: {PREMIUM_PRICE_RUB} рублей (~850 ₸).\n"
-        "Предоставляет неограниченные лимиты на цели, расширенную мультивалютность и приоритетную обработку данных.",
+        "⭐ <b>Привилегированный статус Premium</b>\n\n"
+        f"Стоимость подписки: {PREMIUM_PRICE_RUB} рублей.\n"
+        "Предоставляет неограниченные лимиты на цели, расширенную мультивалютность и криптоактивы.",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -564,13 +642,14 @@ async def give_test_premium_callback(update: Update, context: ContextTypes.DEFAU
     conn.commit()
     conn.close()
     
-    await query.edit_message_text("Статус Premium успешно активирован. Ограничения системы сняты. Используйте /newgoal")
+    kb = [[InlineKeyboardButton("📂 Открыть портфель активов", callback_data="back_to_list")]]
+    await query.edit_message_text("🎉 Статус Premium успешно активирован. Все ограничения сняты!", reply_markup=InlineKeyboardMarkup(kb))
 
 # --- АДМИН-ПАНЕЛЬ ---
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != ADMIN_ID:
-        await update.message.reply_text("Доступ запрещен.")
+        await update.message.reply_text("⛔ Доступ запрещен.")
         return
         
     conn = sqlite3.connect(DB_FILE)
@@ -581,14 +660,15 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     revenue = cursor.fetchall()
     conn.close()
     
-    text = "Системная панель администратора\n————————————————————\n"
-    text += f"Всего премиум-пользователей: {buyers}\n\n"
-    text += "Финансовый оборот:\n"
+    text = "🛠 <b>Системная панель администратора</b>\n————————————————————\n"
+    text += f"👥 Всего премиум-пользователей: {buyers}\n\n"
+    text += "💰 Финансовый оборот:\n"
     for curr, total in revenue:
         text += f"• {total} {curr}\n"
-    text += "\nКоманды управления:\n"
+    text += "\n⚙️ <b>Команды управления:</b>\n"
+    text += "• /add_currency — добавить новую валюту или крипту\n"
     text += "• /add_cat [Код] [Имя] — добавить категорию"
-    await update.message.reply_text(text)
+    await update.message.reply_text(text, parse_mode="HTML")
 
 async def admin_add_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
@@ -602,9 +682,9 @@ async def admin_add_category(update: Update, context: ContextTypes.DEFAULT_TYPE)
         cursor.execute("INSERT INTO categories (name, display_name) VALUES (?, ?)", (name, display_name))
         conn.commit()
         conn.close()
-        await update.message.reply_text(f"Категория «{display_name}» добавлена.")
+        await update.message.reply_text(f"✅ Категория «{display_name}» добавлена.")
     except Exception:
-        await update.message.reply_text("Ошибка синтаксиса. Пример: /add_cat RealEstate Недвижимость")
+        await update.message.reply_text("⚠️ Ошибка синтаксиса. Пример: /add_cat RealEstate 🏠 Недвижимость")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
@@ -616,8 +696,13 @@ async def back_to_list_callback(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
     goals = get_user_goals(query.from_user.id)
-    keyboard = [[InlineKeyboardButton(f"{g['name']} — {format_money(g['price'], g['currency'])}", callback_data=f"view_{g['id']}")] for g in goals]
-    await query.edit_message_text("Портфель финансовых целей:", reply_markup=InlineKeyboardMarkup(keyboard))
+    if not goals:
+        kb = [[InlineKeyboardButton("🚀 Создать новую цель", callback_data="start_new_goal")]]
+        await query.edit_message_text("📂 Активных финансовых целей не обнаружено.", reply_markup=InlineKeyboardMarkup(kb))
+        return
+    keyboard = [[InlineKeyboardButton(f"🎯 {g['name']} — {format_money(g['price'], g['currency'])}", callback_data=f"view_{g['id']}")] for g in goals]
+    keyboard.append([InlineKeyboardButton("➕ Создать новую цель", callback_data="start_new_goal")])
+    await query.edit_message_text("💼 <b>Портфель финансовых целей:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
 # --- ТОЧКА ВХОДА ---
 def main():
@@ -632,16 +717,33 @@ def main():
     )
     application.add_handler(time_handler)
 
+    # Админские обработчики
     application.add_handler(CommandHandler("admin", admin_panel))
     application.add_handler(CommandHandler("add_cat", admin_add_category))
+    
+    currency_add_handler = ConversationHandler(
+        entry_points=[CommandHandler("add_currency", admin_add_currency_start)],
+        states={
+            WAITING_NEW_CURR_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_curr_code_entered)],
+            WAITING_NEW_CURR_SYM: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_curr_sym_entered)],
+            WAITING_NEW_CURR_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_curr_name_entered)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True
+    )
+    application.add_handler(currency_add_handler)
 
     application.add_handler(CommandHandler("goals", list_goals))
     application.add_handler(CallbackQueryHandler(back_to_list_callback, pattern="^back_to_list$"))
+    application.add_handler(CallbackQueryHandler(new_goal_start, pattern="^start_new_goal$"))
     application.add_handler(CallbackQueryHandler(buy_premium_callback, pattern="^buy_premium$"))
     application.add_handler(CallbackQueryHandler(give_test_premium_callback, pattern="^give_test_premium$"))
 
     new_goal_handler = ConversationHandler(
-        entry_points=[CommandHandler("newgoal", new_goal_start)],
+        entry_points=[
+            CommandHandler("newgoal", new_goal_start),
+            CallbackQueryHandler(new_goal_start, pattern="^start_new_goal$")
+        ],
         states={
             CHOOSE_CATEGORY: [
                 CallbackQueryHandler(cat_selected, pattern="^cat_"),
