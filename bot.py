@@ -2,9 +2,9 @@ import logging
 import sqlite3
 import asyncio
 import hashlib
+import threading
 import os
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from threading import Thread
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -21,41 +21,43 @@ from telegram.ext import (
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- МИНИ-СЕРВЕР ДЛЯ RENDER (чтобы не было Timed Out) ---
+# --- МИНИ-СЕРВЕР ДЛЯ RENDER (Чтобы бот не засыпал) ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
+        self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bot is alive!")
+        self.wfile.write(b"Bot is alive and running!")
+        
+    def log_message(self, format, *args):
+        return
 
-def run_http_server():
+def run_health_check_server():
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    logger.info(f"Health-check веб-сервер запущен на порту {port}")
     server.serve_forever()
 
-# Запускаем HTTP-сервер в отдельном потоке
-Thread(target=run_http_server, daemon=True).start()
+threading.Thread(target=run_health_check_server, daemon=True).start()
 
 # --- НАСТРОЙКИ БОТА ---
-TOKEN = "8713270514:AAH_iUzAutJrPal8KpLNV-lzA6wSm1gSRI4"
-ADMIN_ID = 123456789  # Поставьте сюда ваш настоящий Telegram ID
+TOKEN = os.environ.get("TELEGRAM_TOKEN", "8713270514:AAH_iUzAutJrPal8KpLNV-lzA6wSm1gSRI4")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 123456789))
 
-# Настройки Aaio
-AAIO_MERCHANT_ID = "YOUR_MERCHANT_ID"
-AAIO_SECRET_1 = "YOUR_SECRET_1"
+AAIO_MERCHANT_ID = os.environ.get("AAIO_MERCHANT_ID", "YOUR_MERCHANT_ID")
+AAIO_SECRET_1 = os.environ.get("AAIO_SECRET_1", "YOUR_SECRET_1")
 PREMIUM_PRICE_RUB = 150.0
 
 # Состояния диалогов
 WAITING_START_TIME = 0
 CHOOSE_CATEGORY, WAITING_NAME, CHOOSE_CURRENCY, SELECT_MODE, WAITING_PRICE, WAITING_SAVED, WAITING_DAILY, WAITING_DATE = range(1, 9)
 WAITING_ADD_SUM = 0
-WAITING_NEW_CURR_CODE, WAITING_NEW_CURR_SYM, WAITING_NEW_CURR_NAME = range(10, 13)
 
 DB_FILE = "savings_bot.db"
 
 # --- БАЗА ДАННЫХ ---
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     cursor = conn.cursor()
     
     cursor.execute("""
@@ -134,7 +136,7 @@ def init_db():
 
 # --- ФУНКЦИИ БД ---
 def get_user_status(user_id: int) -> dict:
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM active_users WHERE user_id = ?", (user_id,))
@@ -145,7 +147,7 @@ def get_user_status(user_id: int) -> dict:
     return {"user_id": user_id, "reminder_time": "21:00", "is_premium": 0}
 
 def get_db_categories():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("SELECT name, display_name FROM categories")
     rows = cursor.fetchall()
@@ -153,7 +155,7 @@ def get_db_categories():
     return rows
 
 def get_db_currencies():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("SELECT code, symbol, name FROM currencies ORDER BY sort_order ASC")
     rows = cursor.fetchall()
@@ -161,7 +163,7 @@ def get_db_currencies():
     return rows
 
 def get_currency_symbol(code: str) -> str:
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("SELECT symbol FROM currencies WHERE code = ?", (code,))
     row = cursor.fetchone()
@@ -169,21 +171,21 @@ def get_currency_symbol(code: str) -> str:
     return row[0] if row else code
 
 def add_active_user(user_id: int):
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("INSERT OR IGNORE INTO active_users (user_id) VALUES (?)", (user_id,))
     conn.commit()
     conn.close()
 
 def update_user_reminder(user_id: int, reminder_time: str):
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("UPDATE active_users SET reminder_time = ? WHERE user_id = ?", (reminder_time, user_id))
     conn.commit()
     conn.close()
 
 def create_goal(user_id: int, data: dict) -> int:
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO goals (user_id, category, name, price, saved, daily, target_date, mode, currency)
@@ -195,7 +197,7 @@ def create_goal(user_id: int, data: dict) -> int:
     return goal_id
 
 def get_user_goals(user_id: int):
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM goals WHERE user_id = ?", (user_id,))
@@ -204,7 +206,7 @@ def get_user_goals(user_id: int):
     return [dict(r) for r in rows]
 
 def get_goal_by_id(goal_id: int):
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM goals WHERE id = ?", (goal_id,))
@@ -213,14 +215,14 @@ def get_goal_by_id(goal_id: int):
     return dict(row) if row else None
 
 def add_money_to_goal(goal_id: int, amount: float):
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("UPDATE goals SET saved = saved + ? WHERE id = ?", (amount, goal_id))
     conn.commit()
     conn.close()
 
 def delete_goal(goal_id: int):
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
     conn.commit()
@@ -243,7 +245,7 @@ async def custom_reminder_loop(application):
         try:
             now = datetime.now()
             current_time_str = now.strftime("%H:%M")
-            conn = sqlite3.connect(DB_FILE)
+            conn = sqlite3.connect(DB_FILE, check_same_thread=False)
             cursor = conn.cursor()
             cursor.execute("SELECT user_id FROM active_users WHERE reminder_time = ?", (current_time_str,))
             user_ids = [r[0] for r in cursor.fetchall()]
@@ -265,6 +267,7 @@ async def custom_reminder_loop(application):
                     logger.error(f"Ошибка отправки напоминания: {e}")
         except Exception as e:
             logger.error(f"Ошибка в цикле напоминаний: {e}")
+            await asyncio.sleep(5)
         await asyncio.sleep(60)
 
 # --- ДИАЛОГ СТАРТА ---
@@ -370,7 +373,7 @@ async def goal_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         goal_id = int(data.split("_")[1])
         context.user_data["current_add_goal_id"] = goal_id
         g = get_goal_by_id(goal_id)
-        kb = [[InlineKeyboardButton("❌ Отмена", callback_data=f"view_{goal_id}")]]
+        kb = [[InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_deposit_{goal_id}")]]
         await query.message.reply_text(f"💵 Введите сумму пополнения для позиции «{g['name']}»:", reply_markup=InlineKeyboardMarkup(kb))
         return WAITING_ADD_SUM
     elif data.startswith("del_"):
@@ -378,6 +381,14 @@ async def goal_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         delete_goal(goal_id)
         kb = [[InlineKeyboardButton("📂 Открыть портфель активов", callback_data="back_to_list")]]
         await query.edit_message_text("🗑 Позиция успешно удалена из портфеля.", reply_markup=InlineKeyboardMarkup(kb))
+
+async def cancel_deposit_to_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    goal_id = int(query.data.split("_")[2])
+    info, reply_markup = generate_goal_card(goal_id)
+    await query.edit_message_text(info, parse_mode="HTML", reply_markup=reply_markup)
+    return ConversationHandler.END
 
 async def process_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -445,7 +456,7 @@ async def cat_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     context.user_data["new_goal"]["category"] = query.data.split("_")[1]
     
     kb = [[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_cat")]]
-    await query.edit_message_text("✏️ Введите наименование цели (например, «Tesla Model 3» или «Квартира в центре»):", reply_markup=InlineKeyboardMarkup(kb))
+    await query.edit_message_text("✏️ Введите наименование цели (например, «Tesla Model 3»):", reply_markup=InlineKeyboardMarkup(kb))
     return WAITING_NAME
 
 async def name_entered(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -455,7 +466,7 @@ async def name_entered(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     keyboard = [[InlineKeyboardButton(f"{name} ({sym})", callback_data=f"curr_{code}")] for code, sym, name in currs]
     keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_name")])
     
-    await update.message.reply_text("💱 <b>Выберите валюту расчетов (фиат или криптовалюта):</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("💱 <b>Выберите валюту расчетов:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     return CHOOSE_CURRENCY
 
 async def currency_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -533,7 +544,7 @@ async def goal_date_entered(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         target_date = datetime.strptime(text, "%d.%m.%Y")
         if target_date.date() < datetime.now().date(): raise ValueError
     except ValueError:
-        await update.message.reply_text("⚠️ Неверная дата. Укажите корректный день (сегодня или в будущем) в формате ДД.ММ.ГГГГ:")
+        await update.message.reply_text("⚠️ Неверная дата. Укажите корректный день в формате ДД.ММ.ГГГГ:")
         return WAITING_DATE
     context.user_data["new_goal"]["target_date"] = text
     goal_id = create_goal(update.effective_user.id, context.user_data["new_goal"])
@@ -543,9 +554,18 @@ async def goal_date_entered(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.message.reply_text(info, parse_mode="HTML", reply_markup=reply_markup)
     return ConversationHandler.END
 
-# НАВИГАЦИЯ «НАЗАД»
+# НАВИГАЦИЯ «НАЗАД» В ДИАЛОГЕ
 async def back_to_cat_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    return await new_goal_start(update, context)
+    query = update.callback_query
+    await query.answer()
+    
+    context.user_data["new_goal"] = {}
+    cats = get_db_categories()
+    keyboard = [[InlineKeyboardButton(display, callback_data=f"cat_{name}")] for name, display in cats]
+    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel_creation")])
+    
+    await query.edit_message_text("📂 <b>Выберите категорию инвестирования:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+    return CHOOSE_CATEGORY
 
 async def back_to_name_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -589,42 +609,14 @@ async def back_to_saved_step(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.edit_message_text("💎 Укажите объем средств, накопленный на текущий момент:", reply_markup=InlineKeyboardMarkup(kb))
     return WAITING_SAVED
 
-# --- ДОБАВЛЕНИЕ НОВОЙ ВАЛЮТЫ ИЛИ КРИПТЫ АДМИНОМ ---
-async def admin_add_currency_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ Доступ запрещен.")
-        return
-    await update.message.reply_text("💱 Введите код новой валюты/крипты (например: <code>USDT</code>, <code>BTC</code>, <code>GBP</code>):", parse_mode="HTML")
-    return WAITING_NEW_CURR_CODE
-
-async def admin_curr_code_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["new_curr"] = {"code": update.message.text.strip().upper()}
-    await update.message.reply_text("🔘 Введите символ валюты (например: <code>₮</code>, <code>₿</code>, <code>£</code>):", parse_mode="HTML")
-    return WAITING_NEW_CURR_SYM
-
-async def admin_curr_sym_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["new_curr"]["symbol"] = update.message.text.strip()
-    await update.message.reply_text("📝 Введите полное название (например: <code>Tether USD</code>, <code>Bitcoin</code>):", parse_mode="HTML")
-    return WAITING_NEW_CURR_NAME
-
-async def admin_curr_name_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    name = update.message.text.strip()
-    c_data = context.user_data["new_curr"]
-    
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("INSERT OR REPLACE INTO currencies (code, symbol, name, sort_order) VALUES (?, ?, ?, 50)",
-                       (c_data["code"], c_data["symbol"], name))
-        conn.commit()
-        await update.message.reply_text(f"✅ Валюта/крипта <b>{name} ({c_data['symbol']})</b> успешно добавлена в систему!", parse_mode="HTML")
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ Ошибка добавления: {e}")
-    finally:
-        conn.close()
+async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if query:
+        await query.answer()
+        await query.edit_message_text("❌ Создание цели отменено.")
     return ConversationHandler.END
 
-# --- ОПЛАТА ---
+# --- ОПЛАТА И ПРЕМИУМ ---
 async def buy_premium_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -640,7 +632,7 @@ async def buy_premium_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.message.reply_text(
         "⭐ <b>Привилегированный статус Premium</b>\n\n"
         f"Стоимость подписки: {PREMIUM_PRICE_RUB} рублей.\n"
-        "Предоставляет неограниченные лимиты на цели, расширенную мультивалютность и криптоактивы.",
+        "Предоставляет неограниченные лимиты на цели и расширенную мультивалютность.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -650,7 +642,7 @@ async def give_test_premium_callback(update: Update, context: ContextTypes.DEFAU
     await query.answer()
     user_id = query.from_user.id
     
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("UPDATE active_users SET is_premium = 1 WHERE user_id = ?", (user_id,))
     cursor.execute("INSERT INTO payments (user_id, amount, currency, pay_date) VALUES (?, ?, ?, ?)",
@@ -668,7 +660,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Доступ запрещен.")
         return
         
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(DISTINCT user_id) FROM payments")
     buyers = cursor.fetchone()[0]
@@ -676,34 +668,12 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     revenue = cursor.fetchall()
     conn.close()
     
-    text = "🛠 <b>Системная панель администратора</b>\n————————————————————\n"
-    text += f"👥 Всего премиум-пользователей: {buyers}\n\n"
-    text += "💰 Финансовый оборот:\n"
+    text = "🛠 <b>Панель администратора</b>\n————————————————————\n"
+    text += f"👥 Премиум-пользователей: {buyers}\n\n"
+    text += "💰 Оборот:\n"
     for curr, total in revenue:
         text += f"• {total} {curr}\n"
-    text += "\n⚙️ <b>Команды управления:</b>\n"
-    text += "• /add_currency — добавить новую валюту или крипту\n"
-    text += "• /add_cat [Код] [Имя] — добавить категорию"
     await update.message.reply_text(text, parse_mode="HTML")
-
-async def admin_add_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
-    try:
-        args = context.args
-        name = args[0]
-        display_name = " ".join(args[1:])
-        
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO categories (name, display_name) VALUES (?, ?)", (name, display_name))
-        conn.commit()
-        conn.close()
-        await update.message.reply_text(f"✅ Категория «{display_name}» добавлена.")
-    except Exception:
-        await update.message.reply_text("⚠️ Ошибка синтаксиса. Пример: /add_cat RealEstate 🏠 Недвижимость")
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    return ConversationHandler.END
 
 async def post_init(application: Application) -> None:
     asyncio.create_task(custom_reminder_loop(application))
@@ -728,27 +698,12 @@ def main():
     time_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start_command)],
         states={WAITING_START_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, start_time_entered)]},
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[CommandHandler("cancel", cancel_conversation)],
         allow_reentry=True
     )
     application.add_handler(time_handler)
 
-    # Админские обработчики
     application.add_handler(CommandHandler("admin", admin_panel))
-    application.add_handler(CommandHandler("add_cat", admin_add_category))
-    
-    currency_add_handler = ConversationHandler(
-        entry_points=[CommandHandler("add_currency", admin_add_currency_start)],
-        states={
-            WAITING_NEW_CURR_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_curr_code_entered)],
-            WAITING_NEW_CURR_SYM: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_curr_sym_entered)],
-            WAITING_NEW_CURR_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_curr_name_entered)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True
-    )
-    application.add_handler(currency_add_handler)
-
     application.add_handler(CommandHandler("goals", list_goals))
     application.add_handler(CallbackQueryHandler(back_to_list_callback, pattern="^back_to_list$"))
     application.add_handler(CallbackQueryHandler(new_goal_start, pattern="^start_new_goal$"))
@@ -763,7 +718,7 @@ def main():
         states={
             CHOOSE_CATEGORY: [
                 CallbackQueryHandler(cat_selected, pattern="^cat_"),
-                CallbackQueryHandler(cat_selected, pattern="^cancel_creation$")
+                CallbackQueryHandler(cancel_conversation, pattern="^cancel_creation$")
             ],
             WAITING_NAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, name_entered),
@@ -794,17 +749,19 @@ def main():
                 CallbackQueryHandler(back_to_saved_step, pattern="^back_to_saved$")
             ],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[CommandHandler("cancel", cancel_conversation)],
         allow_reentry=True
     )
 
     deposit_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(goal_callback_handler, pattern="^(view_|addmoney_|del_)")],
-        states={WAITING_ADD_SUM: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, process_deposit),
-            CallbackQueryHandler(goal_callback_handler, pattern="^view_")
-        ]},
-        fallbacks=[CommandHandler("cancel", cancel)],
+        states={
+            WAITING_ADD_SUM: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, process_deposit),
+                CallbackQueryHandler(cancel_deposit_to_view, pattern="^cancel_deposit_")
+            ]
+        },
+        fallbacks=[CommandHandler("cancel", cancel_conversation)],
         allow_reentry=True
     )
 
