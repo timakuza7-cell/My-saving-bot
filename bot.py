@@ -216,29 +216,32 @@ def generate_aaio_url(order_id, amount, currency="RUB"):
     return f"https://aaio.so/merchant/pay?m={AAIO_MERCHANT_ID}&oa={amount}&o={order_id}&s={sign}&lang=ru"
 
 # --- ФОНОВЫЙ ЦИКЛ НАПОМИНАНИЙ ---
-async def custom_reminder_loop(bot):
+async def custom_reminder_loop(application):
     while True:
-        now = datetime.now()
-        current_time_str = now.strftime("%H:%M")
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id FROM active_users WHERE reminder_time = ?", (current_time_str,))
-        user_ids = [r[0] for r in cursor.fetchall()]
-        conn.close()
-        
-        for u_id in user_ids:
-            goals = get_user_goals(u_id)
-            if not goals: continue
-            text = "Напоминание о формировании капитала\n\nТекущие активы:\n"
-            for g in goals:
-                left = max(0.0, g['price'] - g['saved'])
-                if left > 0:
-                    text += f"• {g['name']} — остаток: {format_money(left, g['currency'])}\n"
-            text += "\nУправление активами: /goals"
-            try:
-                await bot.send_message(chat_id=u_id, text=text)
-            except Exception as e:
-                logger.error(f"Ошибка отправки напоминания: {e}")
+        try:
+            now = datetime.now()
+            current_time_str = now.strftime("%H:%M")
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_id FROM active_users WHERE reminder_time = ?", (current_time_str,))
+            user_ids = [r[0] for r in cursor.fetchall()]
+            conn.close()
+            
+            for u_id in user_ids:
+                goals = get_user_goals(u_id)
+                if not goals: continue
+                text = "Напоминание о формировании капитала\n\nТекущие активы:\n"
+                for g in goals:
+                    left = max(0.0, g['price'] - g['saved'])
+                    if left > 0:
+                        text += f"• {g['name']} — остаток: {format_money(left, g['currency'])}\n"
+                text += "\nУправление активами: /goals"
+                try:
+                    await application.bot.send_message(chat_id=u_id, text=text)
+                except Exception as e:
+                    logger.error(f"Ошибка отправки напоминания: {e}")
+        except Exception as e:
+            logger.error(f"Ошибка в цикле напоминаний: {e}")
         await asyncio.sleep(60)
 
 # --- ДИАЛОГ СТАРТА ---
@@ -607,7 +610,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 async def post_init(application: Application) -> None:
-    asyncio.create_task(custom_reminder_loop(application.bot))
+    asyncio.create_task(custom_reminder_loop(application))
 
 async def back_to_list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
